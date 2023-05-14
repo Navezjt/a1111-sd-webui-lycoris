@@ -9,12 +9,6 @@ import torch.nn.functional as F
 
 from modules import shared, devices, sd_models, errors
 
-now_dir = os.path.dirname(os.path.abspath(__file__))
-lora_path = os.path.join(now_dir, '..', '..', 'extensions-builtin/Lora')
-sys.path.insert(0, lora_path)
-import lora
-new_lora = 'lora_calc_updown' in dir(lora)
-
 metadata_tags_order = {"ss_sd_model_name": 1, "ss_resolution": 2, "ss_clip_skip": 3, "ss_num_train_images": 10, "ss_tag_frequency": 20}
 
 
@@ -285,7 +279,6 @@ KRON_KEY = {
 }
 
 def load_lyco(name, filename):
-    print('locon load lyco method')
     lyco = LycoModule(name)
     lyco.mtime = os.path.getmtime(filename)
 
@@ -625,10 +618,17 @@ def rebuild_weight(module, orig_weight: torch.Tensor, dyn_dim: int=None) -> torc
 def lyco_calc_updown(lyco, module, target):
     with torch.no_grad():
         updown = rebuild_weight(module, target, lyco.dyn_dim)
+        if lyco.dyn_dim and module.dim:
+            dim = min(lyco.dyn_dim, module.dim)
+        elif lyco.dyn_dim:
+            dim = lyco.dyn_dim
+        elif module.dim:
+            dim = module.dim
+        else:
+            dim = None
         scale = (
             module.scale if module.scale is not None
-            else module.alpha / lyco.dyn_dim if module.alpha and lyco.dyn_dim
-            else module.alpha / module.dim if  module.alpha and module.dim
+            else module.alpha / dim if dim is not None and module.alpha is not None
             else 1.0
         )
         # print(scale, module.alpha, module.dim, lyco.dyn_dim)
@@ -642,7 +642,7 @@ def lyco_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn.Mu
     If weights already have this particular set of lycos applied, does nothing.
     If not, restores orginal weights from backup and alters weights according to lycos.
     """
-
+    
     lyco_layer_name = getattr(self, 'lyco_layer_name', None)
     if lyco_layer_name is None:
         return
@@ -654,7 +654,7 @@ def lyco_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn.Mu
 
     weights_backup = getattr(self, "lyco_weights_backup", None)
     lora_weights_backup = getattr(self, "lora_weights_backup", None)
-    if weights_backup is None:
+    if weights_backup is None and len(loaded_lycos):
         # print('lyco save weight')
         if isinstance(self, torch.nn.MultiheadAttention):
             weights_backup = (
@@ -668,6 +668,8 @@ def lyco_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn.Mu
         # print('lyco remove weight')
         self.lyco_weights_backup = None
         lora_weights_backup = None
+    elif len(loaded_lycos) == 0:
+        self.lyco_weights_backup = None
 
     if current_names != wanted_names or lora_prev_names != lora_names:
         if weights_backup is not None and lora_names == lora_prev_names:
@@ -714,7 +716,8 @@ def lyco_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn.Mu
             if module is None:
                 continue
 
-            print(f'failed to calculate lyco weights for layer {lyco_layer_name}')
+            print(3, f'failed to calculate lyco weights for layer {lyco_layer_name}')
+            # print(lyco_his, lyco.name not in lyco_his)
 
         setattr(self, "lora_prev_names", lora_names)
         setattr(self, "lyco_current_names", wanted_names)
