@@ -1,95 +1,67 @@
 from modules import extra_networks, shared
-import lycoris
-
-
-default_args = [
-    ('te', 1.0, float),
-    ('unet', None, float),
-    ('dyn', None, int)
-]
-
-
-def parse_args(params:list):
-    arg_list = []
-    kwarg_list = {}
-    
-    for i in params:
-        if '=' in str(i):
-            k, v = i.split('=', 1)
-            kwarg_list[k] = v
-        else:
-            arg_list.append(i)
-    
-    args = []
-    for name, default, type in default_args:
-        if name in kwarg_list:
-            x = kwarg_list[name]
-        elif arg_list:
-            x = arg_list.pop(0)
-        else:
-            x = default
-        
-        if x == 'default':
-            x = default
-        elif x is not None:
-            x = type(x)
-        
-        args.append(x)
-    
-    return args
+import l_networks as networks
 
 
 class ExtraNetworkLyCORIS(extra_networks.ExtraNetwork):
     def __init__(self):
         super().__init__('lyco')
-        self.cache = ()
+
+        self.errors = {}
+        """mapping of network names to the number of errors the network had during operation"""
 
     def activate(self, p, params_list):
         additional = shared.opts.sd_lyco
 
-        if additional != "" and additional in lycoris.available_lycos and len([x for x in params_list if x.items[0] == additional]) == 0:
-            p.all_prompts = [
-                x + 
-                f"<lyco:{additional}:{shared.opts.extra_networks_default_multiplier}>" 
-                for x in p.all_prompts
-            ]
-            params_list.append(
-                extra_networks.ExtraNetworkParams(
-                    items=[additional, shared.opts.extra_networks_default_multiplier])
-                )
+        self.errors.clear()
+
+        if additional != "None" and additional in networks.available_networks and not any(x for x in params_list if x.items[0] == additional):
+            p.all_prompts = [x + f"<lyco:{additional}:{shared.opts.extra_networks_default_multiplier}>" for x in p.all_prompts]
+            params_list.append(extra_networks.ExtraNetworkParams(items=[additional, shared.opts.extra_networks_default_multiplier]))
 
         names = []
         te_multipliers = []
         unet_multipliers = []
         dyn_dims = []
         for params in params_list:
-            assert len(params.items) > 0
+            assert params.items
 
-            names.append(params.items[0])
-            te, unet, dyn_dim = parse_args(params.items[1:])
-            if unet is None:
-                unet = te
-            te_multipliers.append(te)
-            unet_multipliers.append(unet)
+            names.append(params.positional[0])
+
+            te_multiplier = float(params.positional[1]) if len(params.positional) > 1 else 1.0
+            te_multiplier = float(params.named.get("te", te_multiplier))
+
+            unet_multiplier = float(params.positional[2]) if len(params.positional) > 2 else te_multiplier
+            unet_multiplier = float(params.named.get("unet", unet_multiplier))
+
+            dyn_dim = int(params.positional[3]) if len(params.positional) > 3 else None
+            dyn_dim = int(params.named["dyn"]) if "dyn" in params.named else dyn_dim
+
+            te_multipliers.append(te_multiplier)
+            unet_multipliers.append(unet_multiplier)
             dyn_dims.append(dyn_dim)
-        
-        all_lycos = tuple(
-            (name, te, unet, dyn)
-            for name, te, unet, dyn in zip(names, te_multipliers, unet_multipliers, dyn_dims)
-        )
-        
-        if all_lycos != self.cache:
-            for name, te, unet, dyn in all_lycos:
-                print(
-                    "========================================\n"
-                    f"Apply LyCORIS model: {name}\n"
-                    f"Text encoder weight: {te}\n"
-                    f"Unet weight: {unet}\n"
-                    f"DyLoRA Dim: {dyn}"
-                )
-            print("========================================")
-            self.cache = all_lycos
-        lycoris.load_lycos(names, te_multipliers, unet_multipliers, dyn_dims)
+
+        networks.load_networks(names, te_multipliers, unet_multipliers, dyn_dims)
+
+        if shared.opts.lyco_add_hashes_to_infotext:
+            network_hashes = []
+            for item in networks.loaded_networks:
+                shorthash = item.network_on_disk.shorthash
+                if not shorthash:
+                    continue
+
+                alias = item.mentioned_name
+                if not alias:
+                    continue
+
+                alias = alias.replace(":", "").replace(",", "")
+
+                network_hashes.append(f"{alias}: {shorthash}")
+
+            if network_hashes:
+                p.extra_generation_params["Lyco hashes"] = ", ".join(network_hashes)
 
     def deactivate(self, p):
-        pass
+        if self.errors:
+            p.comment("Networks with errors: " + ", ".join(f"{k} ({v})" for k, v in self.errors.items()))
+
+            self.errors.clear()
